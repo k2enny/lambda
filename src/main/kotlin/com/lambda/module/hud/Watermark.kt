@@ -17,11 +17,12 @@
 
 package com.lambda.module.hud
 
-import com.lambda.graphics.texture.TextureOwner.upload
 import com.lambda.gui.dsl.ImGuiBuilder
-import com.lambda.imgui.ImGui
+import com.lambda.imgui.ImColor
+import com.lambda.imgui.flag.ImGuiCol
 import com.lambda.module.HudModule
 import com.lambda.module.tag.ModuleTag
+import java.awt.Color
 
 @Suppress("unused")
 object Watermark : HudModule(
@@ -29,12 +30,18 @@ object Watermark : HudModule(
     tag = ModuleTag.HUD,
     enabledByDefault = true,
 ) {
-    private val texture = upload("textures/lambda.png")
-    private val scale by setting("Scale", 0.15f, 0.01f..1f, 0.01f)
+    private val watermarkText by setting("Text", "Lambda")
+    private val textColor by setting(
+        "Text Color",
+        Color(80, 210, 255),
+        "Watermark text color"
+    )
 
     override fun ImGuiBuilder.buildLayout() {
-        val width = texture.width * scale
-        val height = texture.height * scale
-        ImGui.image(texture.id.toLong(), width, height)
+        withStyleColor(ImGuiCol.Text, textColor.toImColor()) {
+            text(watermarkText)
+        }
     }
+
+    private fun Color.toImColor() = ImColor.rgba(red, green, blue, alpha)
 }

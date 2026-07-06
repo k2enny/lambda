@@ -70,7 +70,8 @@ repositories {
     mavenLocal() // Allow the use of local repositories
     maven("https://maven.lambda-client.org/releases")
     maven("https://maven.2b2t.vc/releases") // Baritone
-    maven("https://jitpack.io") // KDiscordIPC
+    maven("https://maven.ccbluex.net/snapshots") // DiscordIPC
+    maven("https://jitpack.io")
     maven("https://api.modrinth.com/maven")
     mavenCentral()
 
@@ -158,7 +159,7 @@ dependencies {
 
     // Add dependencies on the required Kotlin modules.
     includeLib("io.github.classgraph:classgraph:${classGraphVersion}")
-    includeLib("com.github.emyfops:KDiscordIPC:$discordIPCVersion")
+    includeLib("com.jagrosh:DiscordIPC:$discordIPCVersion")
     includeLib("com.pngencoder:pngencoder:$pngEncoderVersion")
 
     includeLib("com.lambda:lambda-imgui-java-binding:$spairVersion")

@@ -70,8 +70,8 @@ import net.minecraft.util.math.BlockPos
 import net.minecraft.util.math.Box
 import net.minecraft.util.math.Direction
 import net.minecraft.util.math.Vec3d
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.fixedRateTimer
-import kotlin.math.max
 import kotlin.time.Duration.Companion.milliseconds
 
 @Suppress("unused")
@@ -90,7 +90,6 @@ object CrystalAura : Module(
     @Tab(GENERAL_TAB) private val updateMode by setting("Update Mode", UpdateMode.Async)
     @Tab(GENERAL_TAB) private val updateDelaySetting by setting("Update Delay", 25L, 5L..200L, 5L, unit = " ms") { updateMode == UpdateMode.Async }
     @Tab(GENERAL_TAB) private val maxUpdatesPerFrame by setting("Max Updates Per Frame", 5, 1..20, 1) { updateMode == UpdateMode.Async }
-    @Tab(GENERAL_TAB) private val updateDelay get() = if (updateMode == UpdateMode.Async) updateDelaySetting else 0L
     @Tab(GENERAL_TAB) private val debug by setting("Debug", false)
 
     @Tab(PLACEMENT_TAB) private val placeRange by setting("Place Range", 4.6, 1.0..7.0, 0.1, "Range to place crystals", " blocks")
@@ -124,7 +123,8 @@ object CrystalAura : Module(
     private val actionMap = mutableMapOf<ActionType, MutableList<Opportunity>>()
     private var actionType = ActionType.Normal
 
-    private val updateTimer = Timer()
+    private val pendingAsyncUpdates = AtomicInteger()
+    private var lastAsyncUpdate = 0L
     private var updatesThisFrame = 0
 
     private val placeTimer = Timer()
@@ -139,7 +139,7 @@ object CrystalAura : Module(
         for (x in -1..1) {
             for (z in -1..1) {
                 for (y in 0..1) {
-                    if (x != 0 && y != 0 && z != 0) add(BlockPos(x, y, z))
+                    if (x != 0 || y != 0 || z != 0) add(BlockPos(x, y, z))
                 }
             }
         }
@@ -166,15 +166,12 @@ object CrystalAura : Module(
         ) {
             if (isDisabled || updateMode != UpdateMode.Async) return@fixedRateTimer
 
-            runSafe {
-                // timer may spam faster than main thread computes (game freezes completely at the beginning of the frame)
-                if (updatesThisFrame > maxUpdatesPerFrame) return@runSafe
-                updatesThisFrame++
+            val now = System.currentTimeMillis()
+            if (now - lastAsyncUpdate < updateDelaySetting) return@fixedRateTimer
 
-                // run this safely again to ensure that the context will stay safe at the next frame
-                runSafeGameScheduled {
-                    tick()
-                }
+            lastAsyncUpdate = now
+            pendingAsyncUpdates.updateAndGet {
+                (it + 1).coerceAtMost(maxUpdatesPerFrame)
             }
         }
 
@@ -192,8 +189,14 @@ object CrystalAura : Module(
         }
 
         // Ticking with alignment
-        listen<TickEvent.Pre> {
-            if (updateMode == UpdateMode.Ticked) tick()
+        listen<TickEvent.Input.Post> {
+            when (updateMode) {
+                UpdateMode.Async -> runPendingAsyncTicks()
+                UpdateMode.Ticked -> {
+                    pendingAsyncUpdates.set(0)
+                    tick()
+                }
+            }
         }
 
         listen<TickEvent.Render.Post> {
@@ -242,7 +245,21 @@ object CrystalAura : Module(
 
         onEnable {
             currentTarget = null
+            pendingAsyncUpdates.set(0)
+            updatesThisFrame = 0
+            lastAsyncUpdate = 0L
             resetBlueprint()
+        }
+    }
+
+    private fun SafeContext.runPendingAsyncTicks() {
+        while (updatesThisFrame < maxUpdatesPerFrame) {
+            val pending = pendingAsyncUpdates.get()
+            if (pending <= 0) return
+            if (!pendingAsyncUpdates.compareAndSet(pending, pending - 1)) continue
+
+            updatesThisFrame++
+            tick()
         }
     }
 
@@ -263,8 +280,8 @@ object CrystalAura : Module(
 
     private fun tickInteraction(best: Opportunity) {
         if (!best.blocked) {
-            best.explode()
-            best.place()
+            if (best.canExplode) best.explode()
+            if (best.canPlace) best.place()
             return
         }
 
@@ -279,18 +296,19 @@ object CrystalAura : Module(
             )
 
             blueprint[mutableBlockPos]
-        }.filter { it.hasCrystal }.maxByOrNull { it.priority }?.explode()
+        }.filter { it.hasCrystal && it.canExplode }.maxByOrNull { it.priority }?.explode()
 
-		best.place()
-	}
+        if (best.canPlace) best.place()
+    }
 
-	private fun SafeContext.placeInternal(opportunity: Opportunity, hand: Hand) {
-		interaction.syncSelectedSlot()
-		connection.sendPacket {
-			PlayerInteractBlockC2SPacket(
-				hand, BlockHitResult(opportunity.crystalPosition, opportunity.side, opportunity.blockPos, false), 0
-			)
-		}
+    private fun SafeContext.placeInternal(opportunity: Opportunity, hand: Hand) {
+        interaction.syncSelectedSlot()
+        val hitResult = BlockHitResult(opportunity.crystalPosition, opportunity.side, opportunity.blockPos, false)
+        interaction.sendSequencedPacket(world) { sequence ->
+            PlayerInteractBlockC2SPacket(
+                hand, hitResult, sequence
+            )
+        }
 
         player.swingHand(hand)
     }
@@ -305,129 +323,177 @@ object CrystalAura : Module(
         player.swingHand(Hand.MAIN_HAND)
     }
 
-    private fun SafeContext.updateBlueprint(target: LivingEntity) =
-        updateTimer.runIfPassed(updateDelay.milliseconds) {
-            resetBlueprint()
+    private fun SafeContext.inPlaceRange(pos: BlockPos) =
+        player.eyePos distSq pos.crystalPosition <= placeRange * placeRange
 
-            fun info(
-                pos: BlockPos,
-                target: LivingEntity,
-                blocked: Boolean,
-                crystal: EndCrystalEntity? = null
-            ): Opportunity? {
-                val crystalPos = pos.crystalPosition
+    private fun SafeContext.inExplodeRange(crystal: EndCrystalEntity) =
+        player.eyePos distSq crystal.pos <= explodeRange * explodeRange
 
-                val targetDamage = crystalDamage(crystalPos, target)
-                if (targetDamage < minTargetDamage) return null
+    private fun SafeContext.updateBlueprint(target: LivingEntity) {
+        resetBlueprint()
 
-                val selfDamage = crystalDamage(crystalPos, player)
-                if (selfDamage > maxSelfDamage ||
-                    player.fullHealth - selfDamage <= minPlaceHealth ||
-                    (preventDeath && player.fullHealth - selfDamage <= 0)
-                ) return null
+        fun info(
+            pos: BlockPos,
+            target: LivingEntity,
+            canPlace: Boolean,
+            canExplode: Boolean,
+            blocked: Boolean,
+            crystal: EndCrystalEntity? = null
+        ): Opportunity? {
+            if (!canPlace && !canExplode) return null
 
-                if (priorityMode == Priority.Advantage && priorityMode.factor(
-                        targetDamage,
-                        selfDamage
-                    ) < minDamageAdvantage
-                ) return null
+            val crystalPos = pos.crystalPosition
 
-                return Opportunity(
-                    pos.toImmutable(),
+            val targetDamage = crystalDamage(crystalPos, target)
+            if (targetDamage < minTargetDamage) return null
+
+            val selfDamage = crystalDamage(crystalPos, player)
+            if (selfDamage > maxSelfDamage ||
+                player.fullHealth - selfDamage <= minPlaceHealth ||
+                (preventDeath && player.fullHealth - selfDamage <= 0)
+            ) return null
+
+            if (priorityMode == Priority.Advantage && priorityMode.factor(
                     targetDamage,
-                    selfDamage,
-                    blocked,
-                    crystal
-                )
+                    selfDamage
+                ) < minDamageAdvantage
+            ) return null
+
+            return Opportunity(
+                pos.toImmutable(),
+                targetDamage,
+                selfDamage,
+                canPlace,
+                canExplode,
+                blocked,
+                crystal
+            )
+        }
+
+        // Extra checks for placement, because you may explode but not place in special cases(crystal in the air)
+        fun placeInfo(
+            pos: BlockPos,
+            target: LivingEntity
+        ): Opportunity? {
+            // Check if crystals could be placed on the base block
+            val state = blockState(pos)
+            val isOfBlock = state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.BEDROCK)
+            if (!isOfBlock) return null
+
+            // Check if the block above is air and other conditions for valid crystal placement
+            val above = pos.up()
+            if (!world.isAir(above)) return null
+            if (oldPlace && !world.isAir(above.up())) return null
+
+            // Exclude blocks blocked by entities
+            val crystalBox = pos.crystalBox
+
+            val entitiesNearby = fastEntitySearch<Entity>(3.5, pos)
+            val crystals = entitiesNearby.filterIsInstance<EndCrystalEntity>()
+            val otherEntities = entitiesNearby - crystals + player
+
+            if (otherEntities.any {
+                    it.boundingBox.intersects(crystalBox)
+                }) return null
+
+            // Placement collision checks
+            val baseCrystal = crystals.firstOrNull {
+                it.baseBlockPos == pos
             }
 
-            // Extra checks for placement, because you may explode but not place in special cases(crystal in the air)
-            fun placeInfo(
-                pos: BlockPos,
-                target: LivingEntity
-            ): Opportunity? {
-                // Check if crystals could be placed on the base block
-                val state = blockState(pos)
-                val isOfBlock = state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.BEDROCK)
-                if (!isOfBlock) return null
-
-                // Check if the block above is air and other conditions for valid crystal placement
-                val above = pos.up()
-                if (!world.isAir(above)) return null
-                if (oldPlace && !world.isAir(above.up())) return null
-
-                // Exclude blocks blocked by entities
-                val crystalBox = pos.crystalBox
-
-                val entitiesNearby = fastEntitySearch<Entity>(3.5, pos)
-                val crystals = entitiesNearby.filterIsInstance<EndCrystalEntity>()
-                val otherEntities = entitiesNearby - crystals + player
-
-                if (otherEntities.any {
-                        it.boundingBox.intersects(crystalBox)
-                    }) return null
-
-                // Placement collision checks
-                val baseCrystal = crystals.firstOrNull {
-                    it.baseBlockPos == pos
-                }
-
-                val crystalPlaceBox = pos.crystalPlaceHitBox
-                val blocked = baseCrystal == null && crystals.any {
-                    it.boundingBox.intersects(crystalPlaceBox)
-                }
-
-                return info(
-                    pos,
-                    target,
-                    blocked,
-                    baseCrystal
-                )
+            val crystalPlaceBox = pos.crystalPlaceHitBox
+            val blocked = baseCrystal == null && crystals.any {
+                it.boundingBox.intersects(crystalPlaceBox)
             }
+            val canExplode = baseCrystal?.let { inExplodeRange(it) } ?: false
+            val canPlace = inPlaceRange(pos) && (baseCrystal == null || canExplode)
 
-            val range = max(placeRange, explodeRange) + 1
-            val rangeInt = range.ceilToInt()
+            return info(
+                pos,
+                target,
+                canPlace,
+                canExplode,
+                blocked,
+                baseCrystal
+            )
+        }
 
-            // Iterate through existing crystals
-            val crystalBase = BlockPos.Mutable()
-            fastEntitySearch<EndCrystalEntity>(range).forEach { crystal ->
-                crystalBase.set(crystal.x, crystal.y - 0.5, crystal.z)
-                damage += info(crystalBase, target, false, crystal) ?: return@forEach
-            }
+        // Iterate through existing crystals
+        val crystalBase = BlockPos.Mutable()
+        fastEntitySearch<EndCrystalEntity>(explodeRange + 1.0).forEach { crystal ->
+            if (!inExplodeRange(crystal)) return@forEach
 
-            // Iterate through possible place positions and calculate damage information for each
-            BlockPos.iterateOutwards(player.blockPos.up(), rangeInt, rangeInt, rangeInt).forEach { pos ->
-                if (pos distSq player.pos > range * range) return@forEach
-                if (damage.any { info -> info.blockPos == pos }) return@forEach
+            crystalBase.set(crystal.x, crystal.y - 0.5, crystal.z)
+            damage += info(
+                crystalBase,
+                target,
+                canPlace = false,
+                canExplode = true,
+                blocked = false,
+                crystal = crystal
+            ) ?: return@forEach
+        }
 
-                damage += placeInfo(pos, target) ?: return@forEach
-            }
+        // Iterate through possible place positions and calculate damage information for each
+        val placeRangeInt = placeRange.ceilToInt() + 1
+        BlockPos.iterateOutwards(player.blockPos.up(), placeRangeInt, placeRangeInt, placeRangeInt).forEach { pos ->
+            if (!inPlaceRange(pos)) return@forEach
 
-            // Map opportunities
-            damage.forEach {
-                blueprint[it.blockPos] = it
-            }
+            damage += placeInfo(pos, target) ?: return@forEach
+        }
 
-            // Associate by actions
-            blueprint.values.forEach { opportunity ->
-                actionMap.getOrPut(opportunity.actionType, ::mutableListOf) += opportunity
+        // Map opportunities
+        damage.forEach {
+            blueprint[it.blockPos] = it
+        }
 
-                if (opportunity.actionType.priority > actionType.priority) {
-                    actionType = opportunity.actionType
-                }
-            }
+        // Associate by actions
+        blueprint.values.forEach { opportunity ->
+            actionMap.getOrPut(opportunity.actionType, ::mutableListOf) += opportunity
 
-            // Select best action
-            activeOpportunity = actionMap[actionType]?.maxByOrNull {
-                it.priority
+            if (opportunity.actionType.priority > actionType.priority) {
+                actionType = opportunity.actionType
             }
         }
+
+        // Select best action
+        activeOpportunity = actionMap[actionType]?.maxByOrNull {
+            it.priority
+        }
+    }
 
     private fun resetBlueprint() {
         blueprint.clear()
         damage.clear()
         actionMap.clear()
+        actionType = ActionType.Normal
         activeOpportunity = null
+    }
+
+    private fun SafeContext.ensureCrystalInHand(hand: Hand): Boolean {
+        if (player.getStackInHand(hand).item == Items.END_CRYSTAL) return true
+        if (!swap) return false
+
+        val selection = selectStack { isItem(Items.END_CRYSTAL) }
+
+        return when (hand) {
+            Hand.MAIN_HAND -> runSafeAutomated {
+                var crystalSlot = player.hotbarStacks.indexOfFirst { selection.filterStack(it) }
+                if (crystalSlot < 0) {
+                    if (!selection.transfer(HotbarContainer)) return@runSafeAutomated false
+                    crystalSlot = player.hotbarStacks.indexOfFirst { selection.filterStack(it) }
+                }
+
+                crystalSlot in 0..8 &&
+                    HotbarRequest(
+                        crystalSlot,
+                        this@CrystalAura
+                    ).submit(queueIfMismatchedStage = false).done
+            }
+            Hand.OFF_HAND -> runSafeAutomated {
+                player.offHandStack.item == Items.END_CRYSTAL || selection.transfer(OffHandContainer)
+            }
+        }
     }
 
     /**
@@ -437,6 +503,8 @@ object CrystalAura : Module(
      * @property blockPos The position of the base block where the crystal is placed.
      * @property target The amount of damage inflicted on the target.
      * @property self The amount of damage inflicted on the player.
+     * @property canPlace Whether a crystal can be placed on [blockPos].
+     * @property canExplode Whether the crystal on [blockPos] can be exploded.
      * @property blocked Whether the placement on [blockPos] is blocked by other crystals.
      * @property crystal A crystal that is placed on [blockPos].
      */
@@ -444,6 +512,8 @@ object CrystalAura : Module(
         val blockPos: BlockPos,
         val target: Double,
         val self: Double,
+        val canPlace: Boolean,
+        val canExplode: Boolean,
         var blocked: Boolean,
         var crystal: EndCrystalEntity? // ToDo: packet-based update wisely
     ) {
@@ -479,25 +549,12 @@ object CrystalAura : Module(
          * Places the crystal on [blockPos]
          */
         fun place() = runSafe {
+            if (!canPlace) return@runSafe
+
             if (rotate && !rotationRequest { rotation(placeRotation) }.submit().done)
                 return@runSafe
 
-			val selection = selectStack { isItem(Items.END_CRYSTAL) }
-			if ((swapHand == Hand.MAIN_HAND && player.mainHandStack.item != selection.item) ||
-				(swapHand == Hand.OFF_HAND && player.offHandStack.item != selection.item)
-			) runSafeAutomated {
-				if (!swap) return@runSafe
-				var crystalSlot = player.hotbarStacks.indexOfFirst { selection.filterStack(it) }
-				if (crystalSlot < 0) {
-					val swapTo = when (swapHand) {
-						Hand.MAIN_HAND -> HotbarContainer
-						Hand.OFF_HAND -> OffHandContainer
-					}
-					if (!selection.transfer(swapTo)) return@runSafe
-					crystalSlot = player.hotbarStacks.indexOfFirst { selection.filterStack(it) }
-				}
-				if (!HotbarRequest(crystalSlot, this).submit().done) return@runSafe
-			}
+            if (!ensureCrystalInHand(swapHand)) return@runSafe
 
             placeTimer.runSafeIfPassed(placeDelay.milliseconds) {
                 placeInternal(this@Opportunity, swapHand)
@@ -521,13 +578,13 @@ object CrystalAura : Module(
          * @return Whether the delay passed, null if the interaction failed or no crystal found
          */
         fun explode() {
+            if (!canExplode) return
+            val crystal = crystal ?: return
+
             if (rotate && !rotationRequest { rotation(placeRotation) }.submit().done) return
 
             explodeTimer.runSafeIfPassed(explodeDelay.milliseconds) {
-                crystal?.let { crystal ->
-                    explodeInternal(crystal.id)
-                    explodeTimer.reset()
-                }
+                explodeInternal(crystal.id)
             }
         }
     }

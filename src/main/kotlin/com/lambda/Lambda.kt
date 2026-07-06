@@ -48,7 +48,7 @@ object Lambda : ClientModInitializer {
 	const val MOD_NAME = "Comet"
 	const val MOD_ID = "comet"
 	const val SYMBOL = "☄"
-	const val APP_ID = "1221289599427416127"
+	const val APP_ID = "1520526726114050259"
 	const val REPO_URL = "https://github.com/lambda-client/lambda"
 	val VERSION: String =
 		FabricLoader.getInstance()
