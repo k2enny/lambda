@@ -36,7 +36,6 @@ import com.lambda.util.FormattingUtils.format
 import com.lambda.util.NamedEnum
 import com.lambda.util.TickTimer
 import com.lambda.util.combat.CombatUtils.crystalDamage
-import com.lambda.util.combat.CombatUtils.hasDeadlyCrystal
 import com.lambda.util.combat.DamageUtils.isFallDeadly
 import com.lambda.util.extension.fullHealth
 import com.lambda.util.extension.getBlockState
@@ -111,16 +110,48 @@ object AutoDisconnect : Module(
     private const val COORDINATE_DISCONNECT_GROUP = "Coordinate Disconnect"
     private const val WORLD_BORDER_COORDINATE = 30_000_000
 
+    @Tab(TRIGGERS_TAB) private val health by setting("Health", true, "Disconnect from the server when health is below the set limit.")
+    @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val minimumHealth by setting("Min Health", 10, 1..36, 1, "Set the minimum health threshold for disconnection.", unit = " half-hearts") { health }
+    @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val healthSmart by setting("Smart Toggle", true, "Stop re-triggering on health until it climbs back above the minimum.") { health }
+    @Tab(TRIGGERS_TAB) @Group(HEALTH_GROUP) private val reEnableThreshold by setting("Re-enable Threshold", 14, 1..36, 1, "Once health climbs above this, the Health trigger re-arms. Never lower than Min Health.", unit = " half-hearts") { health && healthSmart }
+
+    @Tab(TRIGGERS_TAB) private val yLevel by setting("Y Level", false, "Disconnect from the server when the player is below a certain y level")
+    @Tab(TRIGGERS_TAB) @Group(Y_LEVEL_GROUP) private val minimumYLevel by setting("Minimum Y Level", 50, 0..319, 1, "The minimum y level the player can be at before disconnecting") { yLevel }
+    @Tab(TRIGGERS_TAB) @Group(Y_LEVEL_GROUP) private val yLevelSmart by setting("Smart Toggle", true, "Stop re-triggering on y level until the player climbs back above it.") { yLevel }
+
+    @Tab(TRIGGERS_TAB) private val coordinates by setting("Coordinates", false, "Disconnect from the server when selected coordinate limits are reached or passed.")
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinate by setting("X Axis", false, "Check the player's X coordinate.") { coordinates }
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinateMode by setting("X Mode", CoordinateMode.LowerOrEqual, "Choose whether X disconnects at or below the limit, or at or above it.") { coordinates && xCoordinate }
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinateLimit by setting("X Value", 0, -WORLD_BORDER_COORDINATE..WORLD_BORDER_COORDINATE, 1, "The X coordinate limit to disconnect at or beyond.") { coordinates && xCoordinate }
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinate by setting("Z Axis", false, "Check the player's Z coordinate.") { coordinates }
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinateMode by setting("Z Mode", CoordinateMode.LowerOrEqual, "Choose whether Z disconnects at or below the limit, or at or above it.") { coordinates && zCoordinate }
+    @Tab(TRIGGERS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinateLimit by setting("Z Value", 0, -WORLD_BORDER_COORDINATE..WORLD_BORDER_COORDINATE, 1, "The Z coordinate limit to disconnect at or beyond.") { coordinates && zCoordinate }
+
+    @Tab(TRIGGERS_TAB) private val falls by setting("Falls", false, "Disconnect if the player will die of fall damage")
+    @Tab(TRIGGERS_TAB) @Group(FALLS_GROUP) private val fallDistance by setting("Fall Distance", 10, 0..30, 1, "Number of blocks fallen before disconnecting for fall damage.", unit = " blocks") { falls }
+    @Tab(TRIGGERS_TAB) @Group(FALLS_GROUP) private val fallsSmart by setting("Smart Toggle", true, "Stop re-triggering on fall damage until the threat clears.") { falls }
+
+    @Tab(TRIGGERS_TAB) private val crystals by setting("Crystals", false, "Disconnect if an End Crystal is close by")
+    @Tab(TRIGGERS_TAB) @Group(CRYSTALS_GROUP) private val playerNearCrystal by setting("Player Near Crystal", true, "Disconnect if a player is near an End Crystal near you") { crystals }
+    @Tab(TRIGGERS_TAB) @Group(CRYSTALS_GROUP) private val projectileNearCrystal by setting("Projectile Near Crystal", true, "Disconnect if a projectile is near an End Crystal near you") { crystals }
+    @Tab(TRIGGERS_TAB) @Group(CRYSTALS_GROUP) private val crystalIgnoreFriends by setting("Ignore Friends", false, "Exclude friends from triggering crystal-based disconnections.") { crystals && playerNearCrystal }
+    @Tab(TRIGGERS_TAB) @Group(CRYSTALS_GROUP) private val crystalsSmart by setting("Smart Toggle", false, "Stop re-triggering on crystals until it will no longer be triggered ") { crystals }
+
+    @Tab(TRIGGERS_TAB) private val creeper by setting("Creepers", true, "Disconnect when an ignited Creeper is nearby.")
+    @Tab(TRIGGERS_TAB) @Group(CREEPERS_GROUP) private val creeperSmart by setting("Smart Toggle", true, "Stop re-triggering on creepers until none are nearby.") { creeper }
+
+    @Tab(TRIGGERS_TAB) private val totem by setting("Totem", false, "Disconnect if the number of Totems is below the required amount.")
+    @Tab(TRIGGERS_TAB) @Group(TOTEM_GROUP) private val minTotems by setting("Min Totems", 2, 1..10, 1, "Set the minimum number of Totems of Undying required to prevent disconnection.") { totem }
+    @Tab(TRIGGERS_TAB) @Group(TOTEM_GROUP) private val totemSmart by setting("Smart Toggle", true, "Stop re-triggering on totems until you're back above the minimum.") { totem }
+
+    @Tab(TRIGGERS_TAB) private val players by setting("Players", false, "Disconnect if a nearby player is detected within the set distance.")
+    @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val minPlayerDistance by setting("Player Distance", 64, 32..128, 4, "Set the distance to detect players for disconnection.") { players }
+    @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val ignoreFriends by setting("Ignore Friends", false, "Exclude friends from triggering player-based disconnections.") { players }
+    @Tab(TRIGGERS_TAB) @Group(PLAYERS_GROUP) private val playersSmart by setting("Smart Toggle", false, "Stop re-triggering on players until none are within range.") { players }
+
     @Tab(TRIGGERS_TAB) private val armor by setting("Armor", false, "Disconnect when an equipped armor piece's durability drops below the set limit.")
     @Tab(TRIGGERS_TAB) @Group(ARMOR_GROUP) private val minArmorDurability by setting("Min Armor Durability", 10, 1..50, 1, "Disconnect when any equipped armor piece's remaining durability falls below this.") { armor }
-    @Tab(TRIGGERS_TAB) @Group(ARMOR_GROUP) @Group(COORDINATE_DISCONNECT_GROUP) private val coordinates by setting("Coordinates", false, "Disconnect from the server when selected coordinate limits are reached or passed.")
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinate by setting("X Axis", false, "Check the player's X coordinate.") { coordinates }
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinateMode by setting("X Mode", CoordinateMode.LowerOrEqual, "Choose whether X disconnects at or below the limit, or at or above it.") { coordinates && xCoordinate }
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val xCoordinateLimit by setting("X Value", 0, -WORLD_BORDER_COORDINATE..WORLD_BORDER_COORDINATE, 1, "The X coordinate limit to disconnect at or beyond.") { coordinates && xCoordinate }
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinate by setting("Z Axis", false, "Check the player's Z coordinate.") { coordinates }
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinateMode by setting("Z Mode", CoordinateMode.LowerOrEqual, "Choose whether Z disconnects at or below the limit, or at or above it.") { coordinates && zCoordinate }
-    @Tab(DISCONNECT_CONDITIONS_TAB) @Group(COORDINATE_DISCONNECT_GROUP) private val zCoordinateLimit by setting("Z Value", 0, -WORLD_BORDER_COORDINATE..WORLD_BORDER_COORDINATE, 1, "The Z coordinate limit to disconnect at or beyond.") { coordinates && zCoordinate }
-    @Tab(DISCONNECT_CONDITIONS_TAB) private val armorSmart by setting("Smart Toggle", true, "Stop re-triggering on armor until durability climbs back above the minimum.") { armor }
+    @Tab(TRIGGERS_TAB) @Group(ARMOR_GROUP) private val armorSmart by setting("Smart Toggle", true, "Stop re-triggering on armor until durability climbs back above the minimum.") { armor }
 
     @Tab(TRIGGERS_TAB) private val entities by setting("Entity", false, "Disconnect when an entity of a selected type is within range.")
     @Tab(TRIGGERS_TAB) @Group(ENTITY_GROUP) private val selectedEntities by setting("Entities", setOf(Registries.ENTITY_TYPE.getId(EntityType.TNT_MINECART).path), Registries.ENTITY_TYPE.ids.map { it.path }.sorted(), "Select specific entities.") { entities }
@@ -391,7 +422,7 @@ object AutoDisconnect : Module(
                 }
             } else null
         }),
-        Coordinates({ coordinates && (xCoordinate || zCoordinate) }, {
+        Coordinates("Coordinates", { coordinates && (xCoordinate || zCoordinate) }, { false }, {
             when {
                 xCoordinate && xCoordinateMode.reached(player.pos.x, xCoordinateLimit) ->
                     buildCoordinateDisconnectReason("X", player.pos.x, xCoordinateLimit, xCoordinateMode)
@@ -400,7 +431,7 @@ object AutoDisconnect : Module(
                 else -> null
             }
         }),
-        Totem({ totem }, {
+        Totem("Totem", { totem }, { totemSmart }, {
             val totemCount = player.allStacks.count { it.item == Items.TOTEM_OF_UNDYING }
             if (totemCount < minTotems) {
                 buildText {
