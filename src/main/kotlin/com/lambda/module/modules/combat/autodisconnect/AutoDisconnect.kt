@@ -34,6 +34,7 @@ import com.lambda.util.CommunicationUtils
 import com.lambda.util.CommunicationUtils.info
 import com.lambda.util.EnchantmentUtils.forEachEnchantment
 import com.lambda.util.FormattingUtils.format
+import com.lambda.util.NamedEnum
 import com.lambda.util.ServerTPSUtils
 import com.lambda.util.SpeedUnit
 import com.lambda.util.TickTimer
